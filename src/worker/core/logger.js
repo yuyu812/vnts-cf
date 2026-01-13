@@ -36,9 +36,33 @@ export class Logger {
     // console.log(`[Logger] 当前日志等级: ${configLevel} (级别: ${this.currentLevel})`);
   }
 
+  // 加载现有日志
+  async loadExistingLogs() {
+    if (!this.enableStorage || !this.storage) return;
+
+    try {
+      const existingLogs = (await this.storage.get("operationLogs")) || [];
+      this.storageBuffer = existingLogs;
+
+      // 如果超过最大数量，保留最新的日志
+      if (this.storageBuffer.length > this.maxStorageLogs) {
+        this.storageBuffer = this.storageBuffer.slice(-this.maxStorageLogs);
+      }
+
+      console.log(
+        `[Logger-存储] 加载了 ${this.storageBuffer.length} 条现有日志`
+      );
+    } catch (error) {
+      console.error(`[Logger-存储] 加载现有日志失败: ${error.message}`);
+      this.storageBuffer = [];
+    }
+  }
+
   // 设置 storage 引用
-  setStorage(storage) {
+  async setStorage(storage) {
     this.storage = storage;
+    // 加载现有日志
+    await this.loadExistingLogs();
   }
 
   // 写入存储
@@ -147,16 +171,16 @@ export class Logger {
 }
 
 // 设置待处理的 storage 引用
-export function setPendingStorage(storage) {
+export async function setPendingStorage(storage) {
   pendingStorage = storage;
   // 如果 logger 已经初始化但没有 storage，立即设置
   if (globalLogger && !globalLogger.storage) {
-    globalLogger.setStorage(storage);
+    await globalLogger.setStorage(storage);
   }
 }
 
 // 日志初始化函数
-function autoInitialize() {
+async function autoInitialize() {
   if (isInitialized) return;
 
   // 从 RelayRoom 获取环境变量
@@ -175,7 +199,7 @@ function autoInitialize() {
 
   globalLogger = new Logger(env);
   if (pendingStorage) {
-    globalLogger.setStorage(pendingStorage);
+    await globalLogger.setStorage(pendingStorage);
   }
   logger.globalLogger = globalLogger;
   isInitialized = true;
@@ -185,26 +209,26 @@ function autoInitialize() {
 export const logger = {
   globalLogger: null,
 
-  error: (...args) => {
-    if (!isInitialized) autoInitialize();
+  error: async (...args) => {
+    if (!isInitialized) await autoInitialize();
     if (globalLogger) {
       globalLogger.error(...args);
     }
   },
-  warn: (...args) => {
-    if (!isInitialized) autoInitialize();
+  warn: async (...args) => {
+    if (!isInitialized) await autoInitialize();
     if (globalLogger) {
       globalLogger.warn(...args);
     }
   },
-  info: (...args) => {
-    if (!isInitialized) autoInitialize();
+  info: async (...args) => {
+    if (!isInitialized) await autoInitialize();
     if (globalLogger) {
       globalLogger.info(...args);
     }
   },
-  debug: (...args) => {
-    if (!isInitialized) autoInitialize();
+  debug: async (...args) => {
+    if (!isInitialized) await autoInitialize();
     if (globalLogger) {
       globalLogger.debug(...args);
     }

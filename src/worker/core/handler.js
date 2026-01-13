@@ -410,6 +410,138 @@ export class PacketHandler {
     }
   }
 
+  /**
+   * 处理 IPv4 广播包
+   * 解析选择性广播包，提取排除地址，然后广播实际数据
+   */
+  async handleIpv4Broadcast(context, packet) {
+    try {
+      const destIp = packet.destination;
+
+      // 只处理网络广播地址，跳过全局广播地址
+      if (destIp === 0xffffffff) {
+        logger.debug(
+          `[广播包-跳过] 跳过全局广播地址: ${this.formatIp(destIp)}`
+        );
+        return null;
+      }
+
+      // 解析广播包
+      const broadcastData = packet.payload;
+      const broadcastPacket = this.parseBroadcastPacket(broadcastData);
+
+      if (!broadcastPacket) {
+        logger.warn("[广播包-解析失败] 广播包格式无效");
+        return null;
+      }
+
+      // 获取排除地址列表
+      const excludeAddresses = broadcastPacket.addresses;
+      const actualData = broadcastPacket.data;
+
+      // 创建新的数据包用于广播
+      const broadcastNetPacket = NetPacket.new(actualData.length);
+      broadcastNetPacket.set_protocol(PROTOCOL.IPTURN);
+      broadcastNetPacket.set_transport_protocol(
+        IP_TURN_TRANSPORT_PROTOCOL.Ipv4
+      );
+      broadcastNetPacket.set_source(packet.source);
+      broadcastNetPacket.set_destination(packet.destination);
+      broadcastNetPacket.first_set_ttl(15);
+
+      // 设置实际数据
+      const payload = broadcastNetPacket.payload_mut();
+      payload.set(actualData);
+
+      // 执行选择性广播
+      return await this.selectiveBroadcast(
+        context.link_context,
+        broadcastNetPacket,
+        excludeAddresses
+      );
+    } catch (error) {
+      logger.error(`[广播包-错误] 处理IPv4广播包失败: ${error.message}`, error);
+      return null;
+    }
+  }
+
+  /**
+   * 解析广播包结构
+   * 格式: [地址数量(1字节)] + [地址列表(4字节*N)] + [实际数据]
+   */
+  parseBroadcastPacket(data) {
+    if (data.length < 5) {
+      return null; // 至少需要1字节地址数量 + 4字节地址
+    }
+
+    const addrCount = data[0];
+    const addrListStart = 1;
+    const addrListEnd = addrListStart + addrCount * 4;
+
+    if (data.length < addrListEnd) {
+      return null; // 数据长度不足
+    }
+
+    // 解析排除地址列表
+    const addresses = [];
+    for (let i = 0; i < addrCount; i++) {
+      const offset = addrListStart + i * 4;
+      const ip =
+        (data[offset] << 24) |
+        (data[offset + 1] << 16) |
+        (data[offset + 2] << 8) |
+        data[offset + 3];
+      addresses.push(ip);
+    }
+
+    // 提取实际广播数据
+    const broadcastData = data.slice(addrListEnd);
+
+    return {
+      addresses,
+      data: broadcastData,
+    };
+  }
+
+  /**
+   * 选择性广播 - 排除指定地址
+   */
+  async selectiveBroadcast(linkContext, packet, excludeAddresses) {
+    const networkInfo = linkContext.network_info;
+    const sender = packet.source;
+    const excludeSet = new Set(excludeAddresses);
+
+    logger.debug(
+      `[选择性广播] 开始广播，排除地址数: ${excludeAddresses.length}`
+    );
+
+    for (const [virtualIp, client] of networkInfo.clients) {
+      // 跳过发送者和排除地址列表中的客户端
+      if (
+        client.virtual_ip === sender ||
+        excludeSet.has(virtualIp) ||
+        !client.online ||
+        !client.tcp_sender
+      ) {
+        continue;
+      }
+
+      try {
+        await client.tcp_sender.send(packet.buffer());
+      } catch (error) {
+        logger.error(
+          `[选择性广播-失败] 广播到 ${this.formatIp(virtualIp)} 失败: ${
+            error.message
+          }`,
+          error
+        );
+        client.online = false;
+      }
+    }
+
+    return null;
+  }
+
   // 处理 IPv4 数据包（包括 ICMP ping）
   async handleIpv4Packet(
     context,
@@ -913,11 +1045,11 @@ export class PacketHandler {
         // logger.info(`[调试-客户端Hash] 设备: ${registrationReq.name} Hash长度: ${clientSecretHash.length} Hash内容: ${Array.from(clientSecretHash).map((b) => b.toString(16).padStart(2, "0")).join("")} Token: ${registrationReq.token}`);
       }
       logger.info(
-        `[注册-请求] 设备ID: ${
-          registrationReq.device_id
-        }, 名称: ${registrationReq.name}，加密状态: ${
-          registrationReq.client_secret
-        }, hash长度: ${registrationReq.client_secret_hash?.length || 0}`
+        `[注册-请求] 设备ID: ${registrationReq.device_id}, 名称: ${
+          registrationReq.name
+        }，加密状态: ${registrationReq.client_secret}, hash长度: ${
+          registrationReq.client_secret_hash?.length || 0
+        }`
       );
 
       // 获取客户端请求的IP
@@ -1341,6 +1473,10 @@ export class PacketHandler {
     // logger.info(`[注册响应-开始] 创建注册响应包，客户端IP: ${this.formatIp(virtualIp)}`);
     // logger.debug(`[注册响应-网络] 当前网络客户端数量: ${networkInfo.clients.size}`);
     // logger.info(`[注册响应-网关Hash] 网关使用客户端Hash: ${Array.from(clientInfo.client_secret_hash || new Uint8Array(0)).map(b => b.toString(16).padStart(2, '0')).join('')}`);
+    // 计算网络广播地址
+    const network = networkInfo.network;
+    const netmask = networkInfo.netmask;
+    const broadcast = network | (~netmask & 0xffffffff);
     // 添加网关信息
     const gatewayInfo = {
       name: this.env.GATEWAY_NAME || "服务器",
@@ -1374,6 +1510,7 @@ export class PacketHandler {
       virtual_ip: virtualIp,
       virtual_gateway: networkInfo.gateway,
       virtual_netmask: networkInfo.netmask,
+      virtual_broadcast: broadcast,
       epoch: networkInfo.epoch,
       device_info_list: deviceInfoList,
       public_ip: networkInfo.public_ip,
@@ -1390,7 +1527,7 @@ export class PacketHandler {
     response.set_transport_protocol(TRANSPORT_PROTOCOL.RegistrationResponse);
 
     response.set_source(networkInfo.gateway); // 设置源地址为网关
-    response.set_destination(0xffffffff); // 设置目标地址为客户端
+    // response.set_destination(0xffffffff); // 设置目标地址为客户端
     response.set_gateway_flag(true); // 设置网关标志
     response.first_set_ttl(15);
 
@@ -1565,7 +1702,20 @@ export class PacketHandler {
   }
 
   isBroadcast(addr) {
-    return addr === 0xffffffff || addr === 0;
+    // 检查全局广播地址
+    if (addr === 0xffffffff || addr === 0) {
+      return true;
+    }
+
+    // 检查网络广播地址
+    if (this.currentNetworkInfo) {
+      const network = this.currentNetworkInfo.network;
+      const netmask = this.currentNetworkInfo.netmask;
+      const broadcast = network | (~netmask & 0xffffffff);
+      return addr === broadcast;
+    }
+
+    return false;
   }
 
   generateRandomKey() {
@@ -1618,6 +1768,8 @@ export class PacketHandler {
     } else {
       networkInfo = this.cache.networks.get(token);
     }
+
+    this.currentNetworkInfo = networkInfo;
 
     // logger.debug(`[网络信息-完成] 返回网络信息 - 网关: ${this.formatIp(networkInfo.gateway)}, 掩码: ${this.formatIp(networkInfo.netmask)}`);
     return networkInfo;

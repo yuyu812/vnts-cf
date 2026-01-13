@@ -63,8 +63,14 @@ class ExpireMap {
 
     for (const [key, item] of this.map.entries()) {
       if (now > item.expireTime) {
+        let displayKey = key;
+        if (Array.isArray(key) && key.length === 2) {
+          // 如果key是[token, ip]格式，转换IP地址
+          const [token, ip] = key;
+          displayKey = `[Token: ${token} IP: ${formatIp(ip)}]`;
+        }
         logger.debug(
-          `[过期映射-清理] 删除过期项: ${key} (过期于: ${formatBeijingTime(
+          `[过期映射-清理] 删除过期项: ${displayKey} (过期于: ${formatBeijingTime(
             new Date(item.expireTime)
           )})`
         );
@@ -248,7 +254,20 @@ export class LinkVntContext {
     this.network_info = options.networkInfo || null;
     this.group = options.group || "";
     this.virtual_ip = options.virtualIp || 0;
-    this.broadcast = options.broadcast || new Ipv4Addr([255, 255, 255, 255]);
+    // 计算网络广播地址
+    if (options.networkInfo) {
+      const network = options.networkInfo.network;
+      const netmask = options.networkInfo.netmask;
+      const broadcast = network | (~netmask & 0xffffffff);
+      this.broadcast = new Ipv4Addr([
+        (broadcast >>> 24) & 0xff,
+        (broadcast >>> 16) & 0xff,
+        (broadcast >>> 8) & 0xff,
+        broadcast & 0xff,
+      ]);
+    } else {
+      this.broadcast = options.broadcast || new Ipv4Addr([255, 255, 255, 255]);
+    }
     this.timestamp = options.timestamp || Date.now();
   }
 }

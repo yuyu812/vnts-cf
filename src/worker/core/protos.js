@@ -149,12 +149,14 @@ export function createRegistrationResponse(
   epoch,
   deviceInfoList,
   publicIp,
-  publicPort
+  publicPort,
+  broadcastIp
 ) {
   const message = {
     virtual_ip: virtualIp || 0,
     virtual_gateway: gateway || 0,
     virtual_netmask: netmask || 0,
+    virtual_broadcast: broadcastIp || 0,
     epoch: epoch || 0,
     device_info_list: deviceInfoList || [],
     public_ip: publicIp || 0,
